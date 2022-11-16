@@ -3,4 +3,4 @@ project(db)
 
 set(CMAKE_CXX_STANDARD 98)
 
-add_executable(db main.c)
+add_executable(db main.c clog.c)

@@ -2,6 +2,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
+
+#include "clog.h"
 
 // part 3 硬编码表的 字段长度
 #define COLUMN_USERNAME_SIZE 32
@@ -19,6 +22,8 @@ typedef enum {
 typedef enum {
     PREPARE_SUCCESS,
     PREPARE_UNRECOGNIZED_STATEMENT,
+    PREPARE_NEGATIVE_ID,
+    PREPARE_STRING_TOO_LONG,
     PREPARE_SYNTAX_ERROR
 } PrepareResult;
 
@@ -40,14 +45,19 @@ typedef struct {
 
 typedef struct {
     uint32_t id;
-    char username[COLUMN_USERNAME_SIZE];
-    char email[COLUMN_EMAIL_SIZE];
+    char username[COLUMN_USERNAME_SIZE + 1];
+    char email[COLUMN_EMAIL_SIZE + 1];
 } Row;
 
 typedef struct {
     StatementType type;
     Row row_to_insert;  // only used by insert statement
 } Statement;
+
+typedef struct {
+    uint32_t num_rows;
+    void *pages[TABLE_MAX_PAGES];
+} Table;
 
 //column	size (bytes)	offset
 //id	    4	            0
@@ -72,10 +82,7 @@ const uint32_t ROWS_PER_PAGE = PAGE_SIZE / ROW_SIZE;
 //表最多有 14 * 100 = 1400 行
 const uint32_t TABLE_MAX_ROWS = ROWS_PER_PAGE * TABLE_MAX_PAGES;
 
-typedef struct {
-    uint32_t num_rows;
-    void *pages[TABLE_MAX_PAGES];
-} Table;
+PrepareResult prepare_insert(InputBuffer *buffer, Statement *statement,CLogger_t logger);
 
 //找出在内存中为特定行读/写的位置
 void *row_slot(Table *table, uint32_t row_num) {
@@ -200,18 +207,48 @@ ExecuteResult execute_statement(Statement *statement, Table *table) {
     }
 }
 
+PrepareResult prepare_insert(InputBuffer* input_buffer,
+                             Statement* statement,
+                             CLogger_t logger) {
+    statement->type = STATEMENT_INSERT;
+
+    char* keyword = strtok(input_buffer->buffer," ");
+    char* id_string = strtok(NULL, " ");
+    char* username = strtok(NULL, " ");
+    char* email = strtok(NULL, " ");
+
+    CLog(&logger, "username : %s, email : %s\r\n",
+         username, email);
+    CLog(&logger, "username length: %d, email length: %d\r\n",
+         strlen(username), strlen(email));
+
+    if (id_string == NULL || username == NULL || email == NULL){
+        return PREPARE_SYNTAX_ERROR;
+    }
+
+    int id = atoi(id_string);
+    if (id < 0) {
+        return PREPARE_NEGATIVE_ID;
+    }
+    if (strlen(username) > COLUMN_USERNAME_SIZE ){
+        return PREPARE_STRING_TOO_LONG;
+    }
+    if (strlen(email) > COLUMN_USERNAME_SIZE ){
+        return PREPARE_STRING_TOO_LONG;
+    }
+
+    statement->row_to_insert.id = id;
+    strcpy(statement->row_to_insert.username,username);
+    strcpy(statement->row_to_insert.email,email);
+
+    return PREPARE_SUCCESS;
+}
+
 PrepareResult prepare_statement(InputBuffer *input_buffer,
-                                Statement *statement) {
+                                Statement *statement,
+                                CLogger_t logger) {
     if (strncmp(input_buffer->buffer, "insert", 6) == 0) {
-        statement->type = STATEMENT_INSERT;
-        //part 3 硬编码表 id username email
-        int args_assigned = sscanf(
-                input_buffer->buffer, "insert %d %s %s", &(statement->row_to_insert.id),
-                statement->row_to_insert.username, statement->row_to_insert.email);
-        if (args_assigned < 3) {
-            return PREPARE_SYNTAX_ERROR;
-        }
-        return PREPARE_SUCCESS;
+        return prepare_insert(input_buffer, statement,logger);
     }
     if (strcmp(input_buffer->buffer, "select") == 0) {
         statement->type = STATEMENT_SELECT;
@@ -221,10 +258,12 @@ PrepareResult prepare_statement(InputBuffer *input_buffer,
     return PREPARE_UNRECOGNIZED_STATEMENT;
 }
 
-MetaCommandResult do_meta_command(InputBuffer *input_buffer,Table *table) {
+MetaCommandResult do_meta_command(InputBuffer *input_buffer, Table *table, CLogger_t logger) {
     if (strcmp(input_buffer->buffer, ".exit") == 0) {
         close_input_buffer(input_buffer);
         free_table(table);
+        //释放日志记录器
+        CLogUninitLogger(&logger);
         exit(EXIT_SUCCESS);
     } else {
         return META_COMMAND_UNRECOGNIZED_COMMAND;
@@ -232,6 +271,20 @@ MetaCommandResult do_meta_command(InputBuffer *input_buffer,Table *table) {
 }
 
 int main(int argc, char *argv[]) {
+    int ret;
+
+    //配置最多记录多少个日志文件，每个日志文件大小
+    CLogger_t logger = {
+            .fileCnt = 1,		//1个日志文件
+            .maxSize = 1024 * 100	//每个日志文件大小
+    };
+
+    //初始化日志记录器
+    ret = CLogInitLogger(&logger, "C:\\Users\\hjd\\CLionProjects\\db\\length.log");
+    if (CLOG_ACK_OK != ret) {
+        printf("CLogInitLogger fail, ret:%d\r\n", ret);
+    }
+
     //table initial
     Table *table = new_table();
     InputBuffer *input_buffer = new_input_buffer();
@@ -240,7 +293,7 @@ int main(int argc, char *argv[]) {
         read_input(input_buffer);
 
         if (input_buffer->buffer[0] == '.') {
-            switch (do_meta_command(input_buffer,table)) {
+            switch (do_meta_command(input_buffer, table, logger)) {
                 case (META_COMMAND_SUCCESS):
                     continue;
                 case (META_COMMAND_UNRECOGNIZED_COMMAND):
@@ -250,9 +303,15 @@ int main(int argc, char *argv[]) {
         }
 
         Statement statement;
-        switch (prepare_statement(input_buffer, &statement)) {
+        switch (prepare_statement(input_buffer, &statement ,logger)) {
             case (PREPARE_SUCCESS):
                 break;
+            case (PREPARE_NEGATIVE_ID):
+                printf("ID must be positive.\n");
+                continue;
+            case (PREPARE_STRING_TOO_LONG):
+                printf("String is too long.\n");
+                continue;
             case (PREPARE_SYNTAX_ERROR):
                 printf("Syntax error. Could not parse statement.\n");
                 continue;
