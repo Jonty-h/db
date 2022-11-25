@@ -2,4 +2,4 @@ cmake-build-debug
 .idea
 db.exe.stackdump
 Gemfile.lock
-length.log
+length.log*
